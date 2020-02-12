@@ -4,6 +4,7 @@
 #include <assert.h>
 #include <sched.h>
 #include <unistd.h>
+#include <errno.h>
 
 #include "asrb_int.h"
 
@@ -11,80 +12,58 @@ unsigned int g_kill_threads = 0;
 unsigned int g_live_threads = 0;
 
 
-void*  asrbGetBufferHeader(HANDLE handle, void* pBuffer)
+int    asrbWriter_Init(HANDLE* pHandle, AsrbWriterConf* pData)
 {
-	AsrbCbBase* pCb = (AsrbCbBase*) handle;
-	for (int i=0; i<pCb->pHeader->frameCounts; i++){
-		if (pBuffer == pCb->pData[i])
-			return &(pCb->pHeader->info[i]);
-	}
-    return NULL;
-}
-
-int    asrbWriter_Init(HANDLE* pHandle, char* name, AsrbWriterConf* pData)
-{
-    void* pBufferList = NULL;
-    unsigned char * pBuffer;
-    AsrbBufferHeader* pHeader = NULL;
     WriterCb* pCb = (WriterCb*) malloc(sizeof(WriterCb));
     if ( !pCb)
         return ASRB_ERR_OutOfMemory;
-    //TEMP: assigned phy base address by user
-    g_BasePhyAddress = pData->basePhyAddress;
-    g_PhyBufferSize = pData->count * pData->size;
-    printf("Allocate maximum total buffers size %d bytes\n", g_PhyBufferSize);
-    //
-    int ret = asrbPhy_Init();
-    if (ret != ASRB_OK)
-    	return ret;
-
     memset(pCb, 0, sizeof(WriterCb));
+
+    int ret = asrbMem_Init((HANDLE)pCb, pData->conf);
+    if( ret != ASRB_OK){
+		return ret;
+    }
+
     pCb->role = ASRB_ROLE_WRITER;
-    strncpy(pCb->name, name, sizeof(pCb->name));
+    pCb->id = pData->id;
 
     /* init IPC */
     g_kill_threads = 0;
     g_live_threads = 0;
-    StartServer(10001, (void*) pCb);
-    /* set up buffers */
-    pHeader = (AsrbBufferHeader*)asrbMem_AllocHeader();
-    if (!pHeader) {
-    	free (pCb);
-        return ASRB_ERR_OutOfPhyMem;
-    }
+    //StartServer(10001, (void*) pCb);
 
-    printf("asrbWriter_Init AsrbBufferHeaderid=%d\n", pHeader->id);
-    pHeader->frameCounts = pData->count;
-    pHeader->maxSize = pData->size;
-    pHeader->frameType = pData->type;
+    /* set up buffers */
+    AsrbBufferHeader* pHeader = asrbMem_FindHeaderPointer((HANDLE)pCb);
+    if (!pHeader) {
+    	printf("Header ID %d not found! Please check configure file %s.\n", pData->id, pData->conf);
+    	asrbMem_Release((HANDLE)pCb);
+    	free (pCb);
+        return ASRB_ERR_HeaderNotFound;
+    }
+    //check if this ASRB is used by other writer
+    if(pHeader->state != 0) {
+    	printf("ASRB %d has been occupied!\n", pCb->id);
+    	asrbMem_Release((HANDLE)pCb);
+    	free (pCb);
+    	return ASRB_ERR_AsrbIsUsed;
+    }
+    pHeader->state = 1;
+
+    printf("asrbWriter_Init AsrbBufferHeader id=%d\n", pHeader->id);
     pCb->fnCallback = pData->fnCallback;
     pCb->pHeader = pHeader;
     /*-- dump cb --*/
-    printf("Writer CB: name=%s, count=%d/%d, size=%d\n", pCb->name,
+    printf("Writer CB: id=%d, count=%d/%d, size=%d\n", pCb->id,
     		pCb->pHeader->frameCounts, pHeader->frameCounts, pHeader->maxSize);
 
-    /* setup each frame buffer */
-    pBufferList = asrbMem_Get(pData->count * pData->size);
-    if (!pBufferList){
-    	free (pCb);
-    	asrbMem_Return(pBufferList);
-        return ASRB_ERR_OutOfPhyMem;
-    }
-    pBuffer = (unsigned char * )pBufferList;
-    unsigned char * pPhy = (unsigned char * )asrbMem_VirtualToPhysical(pBufferList);
-    printf("Buffer address Phy %p->Vir%p\n", pPhy, pBufferList);
+    //init frame info
     for (int i=0; i< pCb->pHeader->frameCounts; i++) {
     	AsrbFrameInfo* pFrame = pHeader->info + i;
-         /*-dump buffer address--*/
-        printf("Buffer %d ->Virt 0x%p\n", i, pBuffer);
         INIT_LOCK(pFrame->lock); //unlock
         pFrame->counter = 0;
         pFrame->width = pData->width;
         pFrame->height = pData->height;
-        pFrame->pDataPhy =  pPhy; //phy address
-        pCb->pData[i] = pBuffer; //virtual address
-        pBuffer += pData->size;
-        pPhy += pData->size;
+        pCb->pData[i] = asrbMem_PhysicalToVirtual((HANDLE) pCb, pFrame->phyData); //virtual address
     }
     printf("asrbWriter_Init OK\n");
     pCb->state = STATE_READY;
@@ -94,7 +73,7 @@ int    asrbWriter_Init(HANDLE* pHandle, char* name, AsrbWriterConf* pData)
 
 void*  asrbWriter_GetBuffer(HANDLE handle)
 {
-	printf("asrbWriter_GetBuffer--\n");
+
     WriterCb* pCb = (WriterCb*) handle;
     assert(pCb->role == ASRB_ROLE_WRITER);
     /* find the oldest unlock buffer */
@@ -102,17 +81,13 @@ void*  asrbWriter_GetBuffer(HANDLE handle)
     unsigned int nMin = 0xFFFFFFFF;
     int ringId = -1;
 
-    //debug
-    int n = pCb->pHeader->frameCounts;
- 	if( 4 != n)
-	{
-		DUMP_HEADERS(pCb->pHeader);
-		assert(0);
-	}
+    printf("asrbWriter_GetBuffer id=%d frameCounts=%d\n", pCb->pHeader->id, pCb->pHeader->frameCounts);
     for (int i=0; i< pCb->pHeader->frameCounts; i++) {
         pFrame = &pCb->pHeader->info[i];
+        printf("i=%d counter=%d nMin=%d\n", i, pFrame->counter, nMin);
+
         if (IS_UNLOCK(pFrame->lock)) {
-            printf("i=%d, counter=%d, nMin=%d\n", i, pFrame->counter, nMin);
+
             if (pFrame->counter < nMin){
                 nMin = pFrame->counter;
                 ringId = i;
@@ -126,11 +101,11 @@ void*  asrbWriter_GetBuffer(HANDLE handle)
     	return NULL;
     }
     pFrame = &pCb->pHeader->info[ringId];
+
     WRITER_LOCK(pFrame->lock);
     pFrame->counter = ++ pCb->currentCount;
 
     pCb->state = STATE_LOCKED;
-    printf("Get buffer %d=%p, counter=%d\n", ringId,  pFrame, pFrame->counter);
 
     return pCb->pData[ringId];
 }
@@ -138,11 +113,9 @@ void   asrbWriter_ReleaseBuffer(HANDLE handle, void* pBuffer)
 {
     WriterCb* pCb = (WriterCb*) handle;
     assert(pCb->role == ASRB_ROLE_WRITER);
-    AsrbFrameInfo*  pFrame = (AsrbFrameInfo* )asrbGetBufferHeader(handle, pBuffer);
+    AsrbFrameInfo*  pFrame = asrbMem_GetFrameInfoByBuffer(handle, pBuffer);
     assert (pFrame); /* one writer, single thread, buffer must be the rent buffer */
     WRITER_UNLOCK(pFrame->lock);
-
-    DUMP_FRAME_INFO(pFrame);
 
     pCb->state = STATE_READY;
 }
@@ -150,25 +123,20 @@ void   asrbWriter_Free(HANDLE handle)
 {
     WriterCb* pCb = (WriterCb*) handle;
     printf("asrbWriter_Free\n");
-    assert(pCb->role == ASRB_ROLE_WRITER);
-    g_kill_threads = (unsigned int)(-1);
-    KillServer();
-    while(g_live_threads){
-    	usleep(10000);
-    }
+    if(pCb) {
+		assert(pCb->role == ASRB_ROLE_WRITER);
+		g_kill_threads = (unsigned int)(-1);
+		KillServer();
+		while(g_live_threads){
+			usleep(10000);
+		}
+		//clear header
+		AsrbBufferHeader* pHeader = asrbMem_FindHeaderPointer(handle);
+		pHeader->state = 0;
 
-    if(pCb->pHeader){
-    	for (int i=0; i< pCb->pHeader->frameCounts; i++){
-    		DEST_LOCK(pCb->pHeader->info[i].lock);
-    	}
-        if(pCb->pData[0])
-        	asrbMem_Return(pCb->pData[0]);
+		asrbMem_Release(handle);
 
-        asrbMem_FreeHeader(pCb->pHeader);
-        asrbPhy_Destroy();
-    }
-
-    if (pCb)
         free(pCb);
+    }
 }
 

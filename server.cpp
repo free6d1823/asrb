@@ -73,7 +73,7 @@ int HandleCommandInit(int fd)
         return ResponseFailed(fd, buffer);
     } else {
     	ResponseOK(fd, buffer);
-    	sprintf(buffer, "\n Header address = %p\n",  asrbMem_VirtualToPhysical(g_CurrentWriterCb->pHeader));
+    	sprintf(buffer, "\n Hello reader\n");
         int m = write(fd, buffer, 512);
         if (m < 0)
         {

@@ -6,48 +6,39 @@
 //#define FIND_OLDER
 
 /* Client/Reader API */
-int    asrbReader_Open(HANDLE* pHandle, char* name, AsrbReaderConf* pData)
+int    asrbReader_Open(HANDLE* pHandle, AsrbReaderConf* pData)
 {
     ReaderCb* pCb = (ReaderCb*) malloc(sizeof(ReaderCb));
     if (!pCb)
     	return ASRB_ERR_OutOfMemory;
     memset(pCb, 0, sizeof(ReaderCb));
+    int ret = asrbMem_Init((HANDLE)pCb, pData->conf);
+    if( ret != ASRB_OK){
+		return ret;
+    }
+    asrbMem_Dump((HANDLE)pCb);
 
-    /* TODO: connect server to get header info and physical base address
-     * 
-     */
-    g_BasePhyAddress = pData->basePhyAddress;
-    g_PhyBufferSize = pData->count * pData->size;
-    printf("Map maximum total buffers size %d bytes\n", g_PhyBufferSize);
-    int nHeaderId = pData->id;
-    //
-
-    int ret = asrbPhy_Open();
-    if (ret != ASRB_OK)
-    	return ret;
-
+    pCb->id = pData->id;
     pCb->role = ASRB_ROLE_READER;
     pCb->state = STATE_INIT;
-    strncpy(pCb->name, name, sizeof(pCb->name));
-    pCb->idReader = pData->id;
     pCb->strategy = pData->strategy;
 
-    AsrbBufferHeader* pHeader = (AsrbBufferHeader*)asrbMem_GetHeader(nHeaderId);
-    if (!pHeader) {
-    	free (pCb);
-        return ASRB_ERR_HeaderNotAllocated;
-    }
-    assert(pHeader->id == nHeaderId);
-    assert(pHeader->frameCounts == 4);
-    //now update frames to user space
-    for (int i=0; i< pHeader->frameCounts; i++){
-    	AsrbFrameInfo* pFrame = pHeader->info + i;
-        pCb->pData[i] = asrbMem_PhysicalToVirtual(pFrame->pDataPhy); //virtual address
-    }
-    DUMP_HEADERS(pHeader);
-    //now change buffer physical address to virtual
-    ///////////////////
-    pCb->pHeader = pHeader;
+    AsrbBufferHeader* pHeader = asrbMem_FindHeaderPointer((HANDLE)pCb);
+     if (!pHeader) {
+     	free (pCb);
+     	printf("Header ID %d not found! Please check configure file %s.\n", pData->id, pData->conf);
+         return ASRB_ERR_HeaderNotFound;
+     }
+     pCb->pHeader = pHeader;
+
+     //init frame info
+     for (int i=0; i< pCb->pHeader->frameCounts; i++) {
+     	AsrbFrameInfo* pFrame = pHeader->info + i;
+         INIT_LOCK(pFrame->lock); //unlock
+         pFrame->counter = 0;
+         pCb->pData[i] = asrbMem_PhysicalToVirtual((HANDLE) pCb, pFrame->phyData); //virtual address
+     }
+
     pCb->state = STATE_READY;
     pCb->currentCount = 0;
     *pHandle = (HANDLE)pCb;
@@ -76,8 +67,7 @@ void*  asrbReader_GetBuffer(HANDLE handle)
         for (int i=0; i< pCb->pHeader->frameCounts; i++) {
             pFrame = &pCb->pHeader->info[i];
             if (IS_UNLOCK(pFrame->lock)){
-   printf("frame i=%d, counter=%d, reader_counter=%d, nTh=%d\n", i, pFrame->counter, pCb->currentCount, nTh);
-            	if (pFrame->counter > pCb->currentCount && pFrame->counter < nTh) {
+              	if (pFrame->counter > pCb->currentCount && pFrame->counter < nTh) {
                 	nTh = pFrame->counter;
                     ringId = i;
                 }
@@ -100,13 +90,6 @@ void*  asrbReader_GetBuffer(HANDLE handle)
         }
     }
     if(ringId == -1){
-    	//debug
-        int n = pCb->pHeader->frameCounts;
-     	if( 4 != n)
-    	{
-    		DUMP_HEADERS(pCb->pHeader);
-    		assert(0);
-    	}
      	//
     	fprintf(stderr, "No buffer is ready! Try again later\n");
     	return NULL;
@@ -123,7 +106,7 @@ void   asrbReader_ReleaseBuffer(HANDLE handle, void* pBuffer)
 {
     ReaderCb* pCb = (ReaderCb*) handle;
     assert(pCb->role == ASRB_ROLE_READER);
-    AsrbFrameInfo*  pFrame = (AsrbFrameInfo* )asrbGetBufferHeader(handle, pBuffer);
+    AsrbFrameInfo*  pFrame = asrbMem_GetFrameInfoByBuffer(handle, pBuffer);
     assert (pFrame); /* one writer, single thread, buffer must be the rent buffer */
     READER_UNLOCK(pFrame->lock);
     printf("asrbReader_ReleaseBuffer unlock frame %d \n", pFrame->counter);
@@ -132,13 +115,9 @@ void   asrbReader_ReleaseBuffer(HANDLE handle, void* pBuffer)
 void   asrbReader_Free(HANDLE handle)
 {
     ReaderCb* pCb = (ReaderCb*) handle;
-    assert(pCb->role == ASRB_ROLE_READER);
     if (pCb) {
-        if(pCb->pHeader){
-            //don't free (pCb->pData[0])
-            //don't call asrbMem_FreeHeader(pCb->pHeader);
-            asrbPhy_Destroy();
-        }
-        free(pCb);
+		assert(pCb->role == ASRB_ROLE_READER);
+		asrbMem_Release(handle);
+		free (pCb);
     }
 }
