@@ -16,8 +16,8 @@
 #define ASRB_ERR_AsrbOpened		-6
 #define ASRB_ERR_HeaderNotFound	-7
 #define ASRB_ERR_FileNotFound	-8
-#define ASRB_ERR_AsrbIsUsed		-9
-
+#define ASRB_ERR_AsrbIsEstablished		-9
+#define ASRB_ERR_AsrbNotEstablished	-10
 #define MAX_FRAME_COUNTS	4 /* max frames in each buffers */
 
 /* ASRB API */
@@ -68,7 +68,11 @@ PHY_ADDR asrbMem_VirtualToPhysical(HANDLE handle, VIR_ADDR pVirt);
 void asrbMem_Dump(HANDLE handle);
 void asrbMem_DumpHeader(HANDLE handle);
 void asrbMem_DumpFrameInfo(HANDLE handle, AsrbFrameInfo* pFrame);
+int asrbMem_CalculateMaxSizeKb(const char* conf);
 
+/* Server used to monitor ASRB */
+int asrbMem_StartServer(const char* conf);
+int asrbMem_KillServer();
 
 /* Server/Writer  API */
 typedef void (*asrbWriterCallback)(HANDLE* pHandle, int event, void* data);
@@ -96,6 +100,7 @@ typedef struct _asrbReaderConf{
     const char* conf;				/* path of ASRB configure file */
     int  id;    					/* ASRB id */
     ASRB_READER_STRATEGY strategy;
+    int idReader;					/* reader ID 1~4 */
 }AsrbReaderConf;
 
 int    asrbReader_Open(HANDLE* pHandle, AsrbReaderConf* pData);

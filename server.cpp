@@ -8,29 +8,33 @@
 #include <signal.h>
 #include <dirent.h>
 #include <pthread.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include "common.h"
 #include "asrb_int.h"
 
-static WriterCb* g_CurrentWriterCb = NULL;
 static long		g_ServerFd = -1;
-int ResponseOK(int fd, const char* comment)
+static int g_kill_threads;
+static int g_live_threads;
+
+int ResponseOK(int fd, const char* comment, struct sockaddr * from, socklen_t fromlen)
 {
     const char text[]= "OK\n";
-    int n = write(fd,text, strlen(text));
+	int n = sendto(fd, text, strlen(text)+1, 0, from, fromlen);
     if (n < 0) {
         perror("ERROR writing to socket");
         return n;
     }
     if(comment){
-        n = write(fd,comment, strlen(comment));
+        n = sendto(fd,comment, strlen(comment)+1, 0, from, fromlen);
     }
     return n;
 }
-int ResponseFailed(int fd, const char* reason)
+int ResponseFailed(int fd, const char* reason, struct sockaddr * from, socklen_t fromlen)
 {
     char buffer[256];
     sprintf(buffer, "FAILED\n%s\n", reason);
-    int n = write(fd,buffer, strlen(buffer));
+    int n = sendto(fd, buffer, strlen(buffer)+1, 0, from, fromlen);
     if (n < 0) {
         perror("ERROR writing to socket");
         return n;
@@ -39,67 +43,87 @@ int ResponseFailed(int fd, const char* reason)
 }
 
 
-int HandleCommandText(int fd, char* arg)
+int HandleCommandText(int fd, char* arg, struct sockaddr * from, socklen_t fromlen)
+{
+    printf("Client says: %s\n", arg);
+
+    ResponseOK(fd, arg, from, fromlen);
+    return 0;
+}
+
+int usage_counts[4][5] = {0};
+
+int HandleCommandWriterIn(int fd, int id, int role, struct sockaddr * from, socklen_t fromlen)
 {
     char buffer[256];
-    int nLen = atoi(arg);
-    if (nLen < 256)
-        ResponseOK(fd, NULL);
-    else {
-        sprintf(buffer, "FAILED. Message too long, the maximum is %d characters.\n", (int) sizeof(buffer)-1);
-        return ResponseFailed(fd, buffer);
-    }
-
-    //prepare to read message
-    memset(buffer, 0, 256);
-    int n = read(fd,buffer,255);
-    if (n < 0) {
-      perror("ERROR reading from socket");
-    }
-    buffer[n] = 0;
-    printf("Client says: %s\n", buffer);
-    ResponseOK(fd, NULL);
-    return 0;
-}
-
-int HandleCommandInit(int fd)
-{
-    char buffer[512];
-
-    int len = 512*100;
-    int n = 0;
-    if (!g_CurrentWriterCb) {
-        sprintf(buffer, "FAILED. Writer not init yet.\n");
-        return ResponseFailed(fd, buffer);
+    if(id < 4 && role ==0) {
+    	usage_counts[id][0] ++;
+    	sprintf(buffer, "ASRB %d - %d writers.", id, usage_counts[id][0]);
+    	printf("%s\n", buffer);
+    	ResponseOK(fd, buffer, from, fromlen);
     } else {
-    	ResponseOK(fd, buffer);
-    	sprintf(buffer, "\n Hello reader\n");
-        int m = write(fd, buffer, 512);
-        if (m < 0)
-        {
-            perror("HandleCommandInit: Write socket error!\n");
-        }else
-        {
-
-        	printf("HandleCommandInit done\n");
-	}
+    	sprintf(buffer, "Invalid ID numbers %d - %d", id, role);
+    	ResponseFailed(fd, buffer, from, fromlen);
     }
     return 0;
 }
-
-void* ProcessClientCommand(void* data)
+int HandleCommandWriterOut(int fd, int id, int role, struct sockaddr * from, socklen_t fromlen)
 {
-    int fd = *(int*) data;
+    char buffer[256];
+    if(id < 4 && role ==0) {
+    	usage_counts[id][0] --;
+    	sprintf(buffer, "ASRB %d : %d writers.", id, usage_counts[id][0]);
+    	printf("%s\n", buffer);
+    	ResponseOK(fd, buffer, from, fromlen);
+    } else {
+    	sprintf(buffer, "Invalid ID numbers %d - %d", id, role);
+    	ResponseFailed(fd, buffer, from, fromlen);
+    }
+    return 0;
+}
+int HandleCommandReaderIn(int fd, int id, int role, struct sockaddr * from, socklen_t fromlen)
+{
+    char buffer[256];
+    if(id < 4 && role <5) {
+    	usage_counts[id][role] ++;
+    	sprintf(buffer, "ASRB %d - %d reader: %d.", id, role, usage_counts[id][role]);
+    	printf("%s\n", buffer);
+    	ResponseOK(fd, buffer, from, fromlen);
+    } else {
+    	sprintf(buffer, "Invalid ID numbers %d - %d", id, role);
+    	ResponseFailed(fd, buffer, from, fromlen);
+    }
+}
+int HandleCommandReaderOut(int fd, int id, int role, struct sockaddr * from, socklen_t fromlen)
+{
+    char buffer[256];
+    if(id < 4 && role <5) {
+    	usage_counts[id][role] --;
+    	sprintf(buffer, "ASRB %d - %d reader: %d.", id, role, usage_counts[id][role]);
+    	printf("%s\n", buffer);
+    	ResponseOK(fd, buffer, from, fromlen);
+    } else {
+    	sprintf(buffer, "Invalid ID numbers %d - %d", id, role);
+    	ResponseFailed(fd, buffer, from, fromlen);
+    }
+}
+
+int ProcessClientCommand(int fd)
+{
+
     int n;
     char buffer[256];
+    struct sockaddr_un from;
+    socklen_t fromlen = sizeof(from);
 
     memset(buffer, 0, 256);
-    n = read(fd,buffer,255);
+    n = recvfrom(fd,buffer,255, 0, (struct sockaddr *)&from, &fromlen);
     if (n<0) {
         printf("Read client message error!\n");
-        return (void*) -1;
+        return  -1;
     }
     buffer[n] = 0;
+
     char* pCmd;
     char* pArg = NULL;
     char* pArg2 = NULL;
@@ -107,94 +131,89 @@ void* ProcessClientCommand(void* data)
     pCmd = strtok(buffer, "\n");
     if (!pCmd){
         printf("Unrecognized client message %s\n", buffer);
-        return (void*) -2;
+        return -2;
     }
+
     pArg = strtok(NULL, "\n");
     if (pArg) {
         pArg2 = pArg + strlen(pArg) + 1;
     }
-    printf("Client commands: %s", pCmd);
+    printf("Client: %s", pCmd);
     if (pArg) {
         printf("- %s\n", pArg);
     } else {
         printf("\n");
     }
-    if (strcmp(pCmd, PUT_TEXT) ==0 ){
-        HandleCommandText(fd, pArg);
-    } else if(strcmp(pCmd, READER_INIT) ==0 ) {
-        HandleCommandInit(fd);
+
+    if (strcmp(pCmd, SEND_TEXT) ==0 ){
+        HandleCommandText(fd, pArg, (struct sockaddr *)&from, fromlen);
+    } else if(strcmp(pCmd, WRITER_IN) ==0 ) {
+        HandleCommandWriterIn(fd, atoi(pArg), atoi(pArg2), (struct sockaddr *)&from, fromlen);
+    } else if(strcmp(pCmd, WRITER_OUT) ==0 ) {
+        HandleCommandWriterOut(fd, atoi(pArg), atoi(pArg2), (struct sockaddr *)&from, fromlen);
+    } else if(strcmp(pCmd, READER_IN) ==0 ) {
+        HandleCommandReaderIn(fd, atoi(pArg), atoi(pArg2), (struct sockaddr *)&from, fromlen);
+    } else if(strcmp(pCmd, READER_OUT) ==0 ) {
+        HandleCommandReaderOut(fd, atoi(pArg), atoi(pArg2), (struct sockaddr *)&from, fromlen);
     }
 
-    return (void*) 0;
+    return  0;
 }
 
-int CreateServer(int port)
+int CreateServer(char* name)
 {
-    struct sockaddr_in serv_addr;
-    int sockfd = socket(AF_INET, SOCK_STREAM, 0);
+    struct sockaddr_un serv_addr;
+    int sockfd = socket(PF_UNIX, SOCK_DGRAM, 0);
     if (sockfd < 0) {
         perror("ERROR opening socket");
         return -1;
     }
     /* Initialize socket structure */
     memset((char *) &serv_addr, 0, sizeof(serv_addr));
-    serv_addr.sin_family = AF_INET;
-    serv_addr.sin_addr.s_addr = INADDR_ANY;
-    serv_addr.sin_port = htons(port);
+    serv_addr.sun_family = AF_UNIX;
+    strcpy(serv_addr.sun_path, name);
+    unlink(name);
 
-    printf("Bind to %d\n", port);
+    printf("Server bind to %s\n", name);
     /* Now bind the host address using bind() call.*/
     if (bind(sockfd, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
         perror("ERROR on binding");
         return -1;
     }
-    listen(sockfd,5);
+
     return sockfd;
 }
-int OnAccept(int fd)
-{
-    struct sockaddr_in cli_addr;
-    socklen_t clilen= sizeof(cli_addr);
-    int newsockfd = accept(fd, (struct sockaddr *) &cli_addr, &clilen);
-    if (newsockfd < 0) {
-       perror("server accept abort\n");
-    }
-    return newsockfd;
-}
 
-void* RunServer(void* data)
+int StartServer(char* serverName)
 {
-    //set current folder as global, since cwd works for child thread only
-	long fd = (long) data;
-	g_live_threads |= IPC_SERVER_ID;
-    while (g_kill_threads == 0) {
-      int fdClient = OnAccept(fd);
-      if (fdClient < 0){
-          close(fd);
-          break;
-      }
-      pthread_t thread;
-      pthread_create(&thread, NULL, ProcessClientCommand, (void*) &fdClient);
 
-    }
-    g_live_threads = 0; /* force all other threads to stop */
-    printf("Server terminated.\n");
-    return (void*) 0;
-}
-int StartServer(int port, void* data)
-{
-	g_ServerFd = CreateServer(port);
+    g_kill_threads = 0;
+    g_live_threads = 0;
+
+
+	g_ServerFd = CreateServer(serverName);
     if (g_ServerFd <0){
-    	fprintf(stderr, "Failed to create server, port(%d).\n", port);
+    	fprintf(stderr, "Failed to create server %s.\n", serverName);
     	return ASRB_ERR_CreateIpcError;
     }
-    g_CurrentWriterCb = (WriterCb*)data;
-    pthread_t thread;
-    pthread_create(&thread, NULL, RunServer, (void*) g_ServerFd);
+
+    //set current folder as global, since cwd works for child thread only
+	g_live_threads =1;
+
+	while(g_kill_threads ==0) {
+		if (0 != ProcessClientCommand(g_ServerFd))
+			break;
+	}
+	if(g_ServerFd)
+		close(g_ServerFd);
+    g_live_threads = 0; /* force all other threads to stop */
+    printf("Server terminated.\n");
+    return ASRB_OK;
 
 }
 void KillServer()
 {
+	g_kill_threads = 1;
 	if (g_ServerFd >=0){
 		shutdown(g_ServerFd, SHUT_RDWR);
 		close(g_ServerFd);

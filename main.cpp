@@ -10,7 +10,7 @@
 #include "asrb_api.h"
 /*jitter test */
 int g_usPeriod = 100000;
-int g_msMaxVar= 30; /* maximum variation between period */
+int g_msMaxVar= 0; /* maximum variation between period */
 
 ASRB_READER_STRATEGY g_Strategy = ASRB_STRATEGY_OLDER;
 
@@ -19,14 +19,14 @@ char* conf_name = (char*) def_conf;
 void printUsage(char* argv)
 {
     printf("ASRB tester. Usage:\n");
-    printf("%s [[-s] -w width -h height | -c -d id -g stratege] [-t period] [-v variation] -f conf id\n", argv);
+    printf("%s [-s] |[-w width -h height | -c reader -d id -g stratege] [-t period] [-v variation] -f conf id\n", argv);
     printf("server/writer options:\n");
-    printf("\t-s                   launch as writer/server\n");
-    printf("\t-w width			    numbers of buffers\n");
+    printf("\t-s                   launch as ASRB manager server\n");
+    printf("\t-w width			    width\n");
     printf("\t-h height        		height\n");
 
     printf("client/reader options:\n");
-    printf("\t-c                   launch as reader/client\n");
+    printf("\t-c reader            launch as reader (1~4)\n");
     printf("\t-g stratege          reader get frame stratege (default 0=older; 1=newer)\n");
 
     printf("common options:\n");
@@ -36,17 +36,22 @@ void printUsage(char* argv)
 
     printf("\t id                  ID to identify the ASRB\n\n");
     printf("examples:\n");
-    printf("<server> sudo %s -f /home/cj/asrb/bin/asrb.conf 1\n", argv);
-    printf("<client> sudo %s -c -f /home/cj/asrb/bin/asrb.conf 1\n", argv);
+    printf("<writer> sudo %s -w 10 -h 10 -f /home/cj/asrb/bin/asrb.conf 1\n", argv);
+    printf("<reader> sudo %s -c 2 -f /home/cj/asrb/bin/asrb.conf 1\n", argv);
+    printf("<server> sudo %s -s -f /home/cj/asrb/bin/asrb.conf 1\n", argv);
     printf("\n");
 }
 
+bool isServer = false;
+bool isWriter = true;
 
 bool gKillThreads = false;
 void onSignalInt(int signum) 
 {
     gKillThreads = true;
     printf("onSignalInt = %d\n", signum);
+    if(isServer)
+    	asrbMem_KillServer();
 }
  
 
@@ -55,7 +60,7 @@ void AsrbWriterCallback(HANDLE* pHandle, int event, void* data)
     printf("AsrbWriterCallback event=%x\n", event);
 }
 
-void testServer(char* conf, int id, int width, int height)
+void testWriter(char* conf, int id, int width, int height)
 {
     srand((int)time(0));
 
@@ -76,9 +81,11 @@ void testServer(char* conf, int id, int width, int height)
     }
     asrbMem_Dump(handle);
     int n = 0;
-    struct timeval tv;
+	struct timeval tv;
+	struct timeval tvNext;
 
     while (!gKillThreads) {
+		gettimeofday(&tv, NULL);
     	char* pBuffer = (char*) asrbWriter_GetBuffer(handle);
 
     	if(pBuffer){
@@ -86,7 +93,7 @@ void testServer(char* conf, int id, int width, int height)
     	    struct tm *tp;
     	    tp = localtime(&t);
     		n++;
-    		gettimeofday(&tv, NULL);
+
     		struct tm *localtime(const time_t *calptr);
     		memset(pBuffer, 0, 64);//simple guest length
     		usleep(10000);
@@ -99,14 +106,20 @@ void testServer(char* conf, int id, int width, int height)
     		asrbWriter_ReleaseBuffer(handle, pBuffer);
     		asrbMem_DumpFrameInfo(handle, asrbMem_GetFrameInfoByBuffer(handle, pBuffer));
     	}
-    	long det = (rand()%1000) - 500;
-        usleep(g_usPeriod + g_msMaxVar* det);
+
+		long detExpt = (rand()%1000) - 500;
+		detExpt = g_usPeriod + g_msMaxVar* detExpt;
+		gettimeofday(&tvNext, NULL);
+		long det = (tvNext.tv_sec - tv.tv_sec)*1000000 + (tvNext.tv_usec - tv.tv_usec);
+		detExpt = detExpt - det -250;
+		usleep(detExpt);
+
     }
     if(handle)
         asrbWriter_Free(handle);
-    printf ("TestServer Terminated\n\n");
+    printf ("testWriter Terminated\n\n");
 }
-void testClient(char* conf, int id)
+void testReader(char* conf, int id, int reader)
 {
 	printf ("Test Client %s %d\n", conf, id);
 	srand((int)time(0));
@@ -115,6 +128,7 @@ void testClient(char* conf, int id)
 	asrb.conf = conf;
 	asrb.id = id;
     asrb.strategy = g_Strategy;
+    asrb.idReader = reader;
 
 	HANDLE handle;
 	int err = asrbReader_Open(&handle, &asrb);
@@ -124,31 +138,40 @@ void testClient(char* conf, int id)
 	}
 	int n = 0;
 	struct timeval tv;
+	struct timeval tvNext;
 
 	while (!gKillThreads) {
+		gettimeofday(&tv, NULL);
 		char* pBuffer = (char*) asrbReader_GetBuffer(handle);
-
+   	    time_t t = time(NULL);
+ 	    struct tm *tp;
+	    tp = localtime(&t);
+		struct tm *localtime(const time_t *calptr);
+		printf("[R:]%d [%ld.%06ld] now %d:%d:%d \n",
+		    				n, tv.tv_sec, tv.tv_usec,
+		    				tp->tm_hour,tp->tm_min,tp->tm_sec);
 		if(pBuffer){
-    	    time_t t = time(NULL);
-    	    struct tm *tp;
-    	    tp = localtime(&t);
     		n++;
-    		gettimeofday(&tv, NULL);
-    		struct tm *localtime(const time_t *calptr);
-    		printf("R:%d [%16ld.%06ld] %d:%d:%d--(buffer)%s\n",
-    				n, tv.tv_sec, tv.tv_usec,
-    				tp->tm_hour,tp->tm_min,tp->tm_sec,
-					pBuffer);
+    		printf("[W:]%s\n", pBuffer);
 
     		asrbReader_ReleaseBuffer(handle, pBuffer);
+		}else {
+			printf("No buffer!\n");
 		}
-		long det = (rand()%1000) - 500;
-		usleep(g_usPeriod + g_msMaxVar* det);
+		long detExpt = (rand()%1000) - 500;
+		detExpt = g_usPeriod + g_msMaxVar* detExpt;
+		gettimeofday(&tvNext, NULL);
+		long det = (tvNext.tv_sec - tv.tv_sec)*1000000 + (tvNext.tv_usec - tv.tv_usec);
+		detExpt = detExpt - det - 250;
+		if(detExp < 1000){
+			printf("time")
+		}
+		usleep(detExpt);
 	}
 	if(handle)
 		asrbReader_Free(handle);
 
-	printf ("TestServer Terminated\n\n");
+	printf ("testReader Terminated\n\n");
 }
 
 
@@ -156,13 +179,14 @@ void testClient(char* conf, int id)
 int main(int argc, char* argv[])
 {
     int ch;
-    bool isServer = true;
 
     int width = 0;
     int height = 0;
     int id = 1;
+    int reader=1;
     int ret;
     signal(SIGINT, onSignalInt);
+
 //    signal(SIGTERM, onSignalInt);
 
     if (argc <2)
@@ -170,13 +194,13 @@ int main(int argc, char* argv[])
         printUsage(argv[0]);
         exit(1);
     }
-    while ((ch = getopt(argc, argv, "sw:h:f:ct:v:g:?")) != -1)
+    while ((ch = getopt(argc, argv, "sw:h:f:c:t:v:g:?")) != -1)
     {
-        printf("optind: %d - %s\n", optind, argv[optind]);
         switch (ch)
         {
         case 'c':
-            isServer = false;
+        	isWriter = false;
+        	reader = atoi(optarg);
             break;
         case 's':
             isServer = true;
@@ -206,12 +230,14 @@ int main(int argc, char* argv[])
         }
     }
 
+    if(optind>=0)
+   		id = atoi(argv[optind]);
 
-   	id = atoi(argv[optind]);
-
-    if (isServer)
-        testServer(conf_name, id, width, height);
+    if (isServer){
+    	asrbMem_StartServer(conf_name);
+    }else if(isWriter)
+        testWriter(conf_name, id, width, height);
     else
-        testClient(conf_name, id);
+        testReader(conf_name, id, reader);
     exit(0);
 }

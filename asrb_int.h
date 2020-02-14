@@ -6,17 +6,23 @@
 
 
 /* IPC related API and variables */
-#define IPC_SERVER_ID	0x0001
-#define IPC_CLIENT_ID	0x0002
-extern unsigned int g_kill_threads;	/* main thread to kill threads */
-extern unsigned int g_live_threads; /* set 0 if thread killed */
-int StartServer(int port, void* data);
+int StartServer(char* serverName);
 void KillServer();
+void RunClient(char* serverName, int idAsrb, int idRole, int command, void* argument);
+#define IPCCMD_SEND_TEXT	0x1000 /* message */
+#define IPCCMD_WRITER_JOIN  0x1001 /* 0 */
+#define IPCCMD_WRITER_LEAVE	0x1002 /* 0 */
+#define IPCCMD_READER_JOIN	0x1003 /* readerID */
+#define IPCCMD_READER_LEAVE	0x1004 /* readerID */
+
 /*-- common type declarations --*/
 
 typedef enum _AsrbRole {
 	ASRB_ROLE_WRITER = 0,
-	ASRB_ROLE_READER = 1,
+	ASRB_ROLE_READER1 = 1,
+	ASRB_ROLE_READER2 = 2,
+	ASRB_ROLE_READER3 = 3,
+	ASRB_ROLE_READER4 = 4,
 }AsrbRole;
 
 typedef enum _AsrbState {
@@ -49,6 +55,9 @@ typedef struct _asrbCbBase{
     VIR_ADDR  pData[MAX_FRAME_COUNTS];       /* virtual address of each frame data*/
     int currentCount;
     int currentState;
+    /* IPC */
+    char serverIp[64];
+
 }AsrbCbBase;
 
 typedef struct _writerCb{
@@ -64,12 +73,16 @@ typedef struct _writerCb{
     VIR_ADDR  pData[MAX_FRAME_COUNTS];       /* virtual address of each frame data*/
     int currentCount;
     int currentState;
+    /* IPC */
+    char serverIp[64];
+
     /*---- writer specified data ----*/
     asrbWriterCallback fnCallback;
 
 
 }WriterCb;
 
+typedef void* (*GetBufferMethod)(HANDLE handle);
 
 typedef struct _readerCb{
 	char name[64]; 		/* obsolated */
@@ -84,9 +97,12 @@ typedef struct _readerCb{
     VIR_ADDR  pData[MAX_FRAME_COUNTS];       /* virtual address of each frame data*/
     int currentCount;
     int currentState;
+    /* IPC */
+    char serverIp[64];
     /*---- reader specified data ----*/
-    int idReader;
     ASRB_READER_STRATEGY strategy;
+    GetBufferMethod fnGetBufferMethod;
+
 }ReaderCb;
 
 #ifdef USE_LINUX

@@ -315,7 +315,7 @@ static off_t hex2int(char *hex)
 long int GetProfileHex(const char *section, const char *key,long int default_value, void * handle)
 {
     char buffer[256];
-    sprintf(buffer, "0x%X", default_value);
+    sprintf(buffer, "0x%lX", default_value);
     if (GetProfileString(section, key,buffer, sizeof(buffer),buffer, handle)){
 
         return hex2int(buffer);

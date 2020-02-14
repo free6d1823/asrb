@@ -28,7 +28,8 @@ int asrbMem_Init(HANDLE handle, const char* conf)
 	if (!hIni)
 		return ASRB_ERR_FileNotFound;
 	AsrbCbBase* pCb = (AsrbCbBase*)handle;
-	pCb->basePhyAddress = GetProfileHex("mrr", "start", 0x10000, hIni);
+	pCb->basePhyAddress = GetProfileHex("system", "start", 0x10000, hIni);
+
 	int nHeaderCounts = GetProfileInt("mrr", "headerCounts", 1, hIni);
 	int sizeKb  = GetProfileInt("mrr", "sizeKb", 1000, hIni);
 	pCb->phyBufferSize = sizeKb * 1024;
@@ -83,8 +84,39 @@ int asrbMem_Init(HANDLE handle, const char* conf)
 			pHeader++;
 		}
     }
+    //create IPC client
+ 	GetProfileString("system", "name", pCb->serverIp, sizeof(pCb->serverIp), "asrb_server",hIni);
+
     closeIniFile(hIni);
+
 	return ASRB_OK;
+}
+int asrbMem_CalculateMaxSizeKb(const char* conf)
+{
+	void* hIni = openIniFile(conf, true);
+	if (!hIni)
+		return 0;
+	PHY_ADDR basePhyAddress = GetProfileHex("system", "start", 0x10000, hIni);
+	int nHeaderCounts = GetProfileInt("mrr", "headerCounts", 1, hIni);
+	int offsetHeader = sizeof(MasterRecordRegion);
+	int offsetBuffers = sizeof(AsrbBufferHeader)*nHeaderCounts + offsetHeader;
+	PHY_ADDR pFrameBuffer = basePhyAddress + offsetBuffers;
+	for (int i=0; i< nHeaderCounts; i++) {
+		char section[16];
+		sprintf(section, "header%d", i);
+		int frameCounts =  GetProfileInt(section, "frameCounts", 2, hIni);
+		if(frameCounts > MAX_FRAME_COUNTS) frameCounts = MAX_FRAME_COUNTS;
+		int maxSize = GetProfileInt(section, "maxSize", 100, hIni);
+		int align = GetProfileInt(section, "align", 0, hIni);
+		int alignRemained = (1 << align)-1;
+
+		for (int j=0; j< frameCounts; j++) {
+			PHY_ADDR phyData = ((pFrameBuffer + alignRemained)>>align)<<align;
+			pFrameBuffer = phyData + maxSize;
+		}
+    }
+    closeIniFile(hIni);
+	return (pFrameBuffer - basePhyAddress + 1023) >> 10;
 }
 AsrbBufferHeader* asrbMem_FindHeaderPointer(HANDLE handle)
 {
@@ -107,6 +139,8 @@ AsrbFrameInfo*  asrbMem_GetFrameInfoByBuffer(HANDLE handle, void* pBuffer)
 		if (pBuffer == pCb->pData[i])
 			return pCb->pHeader->info+i;
 	}
+	asrbMem_DumpHeader(handle);
+
 	printf("asrbMem_GetFrameInfoByBuffer error!! %d, %d, %p\n", pCb->id, pCb->pHeader->frameCounts, pBuffer);
     return NULL;
 }
@@ -134,6 +168,7 @@ void asrbMem_Dump(HANDLE handle)
 	    for (int i=0; i<pMrr->headerCounts; i++) {
 	    	printf("-- header #%d --\n", i);
 	    	printf("\tid= %d\t\n", pHeader->id);
+	    	printf("\tstate= %d\t\n", pHeader->state);
 	    	printf("\tframeCounts= %d\t\n", pHeader->frameCounts);
 	    	printf("\tframeType= %d\n", pHeader->frameType);
 	    	printf("\tmaxSize= %d bytes\n", pHeader->maxSize);
@@ -196,8 +231,10 @@ void asrbMem_Release(HANDLE handle)
 	if (pCb) {
 		char* baseVirt = (char*)pCb->pMrr;
 		g_ref --;
-		if(g_ref ==0)
-			memset(baseVirt, 0, 4); //erase tag
+		if(g_ref ==0) {
+			//don't erase MRR, other process might still working
+			//memset(baseVirt, 0, sizeof(MasterRecordRegion)); //erase MRR
+		}
 	    printf("munmap 0x%p %ld Bytes\n", baseVirt, pCb->phyBufferSize);
 		munmap(baseVirt, pCb->phyBufferSize);
 
@@ -226,3 +263,32 @@ PHY_ADDR asrbMem_VirtualToPhysical(HANDLE handle, VIR_ADDR pVirt)
 	return (PHY_ADDR)(((PHY_ADDR)pVirt - (PHY_ADDR)pCb->pMrr)+ pCb->basePhyAddress);
 }
 
+
+/* server daemon */
+/* Server used to monitor ASRB */
+
+int asrbMem_StartServer(const char* conf)
+{
+	void* hIni = openIniFile(conf, true);
+	if (!hIni)
+		return ASRB_ERR_FileNotFound;
+
+	if (-1 == daemon(0,1))
+	{
+		printf("startServer error = %d\n", errno);
+	}
+	char serverName[256];
+	if(! GetProfileString("system", "name", serverName, sizeof(serverName), "server",hIni))
+		return ASRB_ERR_InvalidParameters;
+    closeIniFile(hIni);
+
+	StartServer(serverName);
+	return ASRB_OK;
+
+}
+int asrbMem_KillServer()
+{
+	KillServer();
+
+	return ASRB_OK;
+}
